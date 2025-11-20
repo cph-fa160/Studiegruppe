@@ -30,3 +30,6 @@ CREATE TABLE car_observation (
     sold BOOLEAN NOT NULL DEFAULT FALSE,
     FOREIGN KEY (carid) REFERENCES car(carid)
 );
+
+ALTER TABLE car_observation
+ADD COLUMN sold TINYINT(1) NOT NULL DEFAULT 0;
