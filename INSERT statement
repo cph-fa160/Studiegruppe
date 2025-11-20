@@ -1,0 +1,62 @@
+
+
+ #OPDEL colldf I DE 3 TABELLER FRA SQL-SKEMAET
+
+  #TABEL: dealer (invariant)
+dealer_table <- colldf %>%
+  transmute(
+    dealer_id = carid,
+    seller_name,
+    seller_address,
+    seller_cvr
+  ) %>%
+  distinct()
+
+#TABEL: car (invariant)
+car_table <- colldf %>%
+  transmute(
+    carid,
+    makemodel,
+    props,
+    link,
+    dealer_id = carid) %>%
+  distinct()
+
+#TABEL: car_observation (tidsserie)
+obs_table <- colldf %>%
+  transmute(
+    carid,
+    price,
+    scrapedate = Sys.Date()     # første scraping-dato
+  )
+
+#INDSÆT DATA I SQL VIA 
+
+  
+
+#Insert dealer-data
+dbWriteTable(
+  con,
+  name = "dealer",
+  value = dealer_table,
+  append = TRUE,
+  row.names = FALSE
+)
+
+#Insert car-data
+dbWriteTable(
+  con,
+  name = "car",
+  value = car_table,
+  append = TRUE,
+  row.names = FALSE
+)
+
+#Insert observations
+dbWriteTable(
+  con,
+  name = "car_observation",
+  value = obs_table,
+  append = TRUE,
+  row.names = FALSE
+)
