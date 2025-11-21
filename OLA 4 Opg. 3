@@ -1,0 +1,282 @@
+###############################################################
+#                 OPGAVE 3 – OPEN SKY
+###############################################################
+
+library(tidyverse)
+library(jsonlite)
+library(httr)
+library(leaflet)
+library(ggplot2)
+
+# Hjælpefunktioner fra træningsmappen
+source("~/Documents/Opgaver/Util.R")
+
+###############################################################
+#                OPGAVE 3.1 – Hent fly og plot
+###############################################################
+
+# Bounding box for Nordsøen (følger opgavebeskrivelsen)
+lamin = 52.055129
+lamax = 56.196869
+lomin = -6.065140
+lomax = 4.305954
+
+# OpenSky API base og endpoints
+baseurl   <- "https://opensky-network.org/api"
+endpointS <- "/states/all"
+endpointT <- "/tracks/all"
+
+# Vi bygger URL'en til at hente alle fly i Nordsøen
+fullurl <- paste0(
+  baseurl, endpointS,
+  "?lamin=", lamin,
+  "&lomin=", lomin,
+  "&lamax=", lamax,
+  "&lomax=", lomax
+)
+
+# Henter token via den udleverede funktion
+token <- getToken()
+
+# Hent liste af fly i bounding box
+res <- GET(fullurl, add_headers(Authorization = paste("Bearer", token)))
+restxt <- content(res, as = "text")
+resjson <- fromJSON(restxt)
+
+# Laver data.frame ud af fly-listen
+statedfpr <- as.data.frame(resjson$states)
+
+# Navngiv de første 3 kolonner (for overskuelighed)
+colnames(statedfpr)[1:3] <- c("icao24", "callsign", "origin_country")
+
+# Opgave 3.1: Lav barplot over antal fly pr. oprindelsesland
+bar_df <- statedfpr %>%
+  count(origin_country) %>%
+  arrange(desc(n))
+
+ggplot(bar_df, aes(x = reorder(origin_country, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Antal fly over Nordsøen fordelt på lande",
+    x = "Land",
+    y = "Antal fly"
+  )
+
+
+###############################################################
+#                OPGAVE 3.2 – Ét fly: frisk vs cirkulært
+###############################################################
+
+# Udtræk alle icao-koder
+icaov <- statedfpr$icao24
+
+# Vi vælger ét tilfældigt fly (nr. 8)
+ictest <- icaov[[8]]
+
+# Hent track-data for dette fly
+turl <- paste0(baseurl, endpointT, "?icao24=", ictest, "&time=0")
+res <- GET(turl, add_headers(Authorization = paste("Bearer", token)))
+
+tracktxt <- content(res, as="text")
+trackjson <- fromJSON(tracktxt)
+
+statedf <- as.data.frame(trackjson)
+
+# Giv pæne kolonnenavne som følger OpenSky-formatet
+colnames(statedf) <- c("icao24","callsign","startTime","endTime",
+                       "time","lat","lng","alt","crs","grd")
+
+# Hent ét cirkulært træningsfly
+testdf <- readRDS("~/Desktop/train/circMT.rds")
+
+# Plot "friskt" fly
+myEDAPlots(statedf)
+myMapPlot(statedf)
+
+# Plot cirkulært fly
+myEDAPlots(testdf)
+myMapPlot(testdf)
+
+# Kommentar i koden til eksamen:
+# - Cirkulære fly skifter kurs kraftigt -> høj SD(crs)
+# - Lineære fly har stabil kurs -> lav SD(crs)
+# - På kortet vil cirkulære fly krydse egen bane (loop)
+
+
+###############################################################
+#                OPGAVE 3.3 – Loop over ALLE fly
+###############################################################
+# Vi beregner:
+#   1) SD(crs)
+#   2) R² fra lm(lat ~ lng)
+# for både friske fly og træningsflyene
+
+##########################
+# LOOP – FRISKE FLY
+##########################
+
+res_ny <- list()
+
+for (icao in icaov) {
+  cat("Henter track for", icao, "\n")
+  
+  turl <- paste0(baseurl, endpointT, "?icao24=", icao, "&time=0")
+  res <- GET(turl, add_headers(Authorization = paste("Bearer", token)))
+  
+  # Hvis API-kald fejler, spring videre
+  if (res$status_code != 200) next
+  
+  txt <- content(res, as="text")
+  df <- try(fromJSON(txt), silent = TRUE)
+  
+  # Skip hvis JSON er tom eller fejler
+  if (inherits(df, "try-error") || length(df) == 0) next
+  
+  df <- as.data.frame(df)
+  
+  # Skip hvis tracket er for lille til analyse
+  if (nrow(df) < 10) next
+  
+  # Sæt korrekte navne
+  colnames(df) <- c("icao24","callsign","startTime","endTime",
+                    "time","lat","lng","alt","crs","grd")
+  
+  # Fjern rækker uden koordinater
+  df <- df %>% filter(!is.na(lat), !is.na(lng))
+  
+  # Beregn SD(crs)
+  crs_sd <- sd(df$crs, na.rm = TRUE)
+  
+  # R² fra lineær model
+  r2 <- summary(lm(lat ~ lng, data=df))$r.squared
+  
+  # Gem resultat
+  res_ny[[icao]] <- data.frame(
+    icao24 = icao,
+    crs_sd = crs_sd,
+    r2 = r2
+  )
+}
+
+# Saml alle fly metrics til én dataframe
+fresh_metrics <- bind_rows(res_ny)
+
+
+##########################
+# LOOP – TRÆNINGS-FLY
+##########################
+
+fl <- list.files(path="~/Desktop/train", pattern="*.rds", full.names=TRUE)
+
+res_train <- list()
+
+for (f in fl) {
+  df <- readRDS(f)
+  
+  crs_sd <- sd(df$crs, na.rm=TRUE)
+  r2     <- summary(lm(lat ~ lng, data=df))$r.squared
+  
+  res_train[[basename(f)]] <- data.frame(
+    file   = basename(f),
+    crs_sd = crs_sd,
+    r2     = r2
+  )
+}
+
+train_metrics <- bind_rows(res_train)
+
+
+##########################
+# PLOT: Cirkulære vs lineære fly
+##########################
+
+# Visualisering:
+# - Cirkulære fly → høj SD(crs), lav R²
+# - Normale fly   → lav SD(crs), høj R²
+
+ggplot(fresh_metrics, aes(x = r2, y = crs_sd)) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    title = "Cirkulære fly kontra lineære fly",
+    x = "R² for lm(lat ~ lng)",
+    y = "Standardafvigelse i kurs (crs)"
+  )
+
+###############################################################
+#      KLAR TIL OPGAVE 3.4 – EGEN DETEKTIONSALGORITME
+###############################################################
+
+# Et simpelt bud på en cirkeldetektor
+isCircular <- function(df) {
+  crs_sd <- sd(df$crs, na.rm = TRUE)
+  r2     <- summary(lm(lat ~ lng, data=df))$r.squared
+  
+  # TOM IDE: Du vælger selv grænserne i 3.4
+  if (crs_sd > 20 && r2 < 0.4) return(TRUE)
+  return(FALSE)
+}
+
+###############################################################
+# SLUT PÅ OPGAVE 3
+###############################################################
+
+#######################################
+# Opgave 3.4 – Aim high: egen algoritme
+########################################
+# Forudsætter:
+# - fresh_metrics: icao24, crs_sd, r2  (fra Opgave 3.3)
+# - train_metrics: file,   crs_sd, r2  (fra Opgave 3.3)
+
+# 1) Vælg simple tærskler ud fra træningsflyene (som vi ved cirkler)
+#    Idé: cirkelfly har høj SD(crs) og lav R²
+sd_thr <- median(train_metrics$crs_sd, na.rm = TRUE)
+r2_thr <- median(train_metrics$r2,     na.rm = TRUE)
+
+sd_thr
+r2_thr
+
+# 2) Anvend algoritmen på de friske Nordsø-fly
+#    isOff = 1 hvis:
+#    - kursen svinger mere end et typisk cirkelfly (crs_sd >= sd_thr)
+#    - og ruten er mindre lineær end et typisk cirkelfly (r2 <= r2_thr)
+fresh_metrics_flagged <- fresh_metrics %>%
+  mutate(
+    isOff = if_else(
+      crs_sd >= sd_thr & r2 <= r2_thr,
+      1L,         # klassificeret som "cirkelfly"
+      0L          # klassificeret som "normalt" fly
+    )
+  )
+
+# 3) Træningsflyene markeres altid som cirklende (isOff = 1)
+train_metrics_flagged <- train_metrics %>%
+  mutate(
+    isOff = 1L     # disse rds-fly ER vores cirkelfly-sandhed
+  )
+
+# 4) Saml alle resultater i én dataframe "a la nedenstående"
+all_metrics <- bind_rows(
+  fresh_metrics_flagged %>%
+    mutate(source = "fresh") %>%       # friske fly fra Nordsøen
+    rename(id = icao24),
+  
+  train_metrics_flagged %>%
+    mutate(source = "train") %>%       # cirkel-træningsfly
+    rename(id = file)
+)
+
+View(all_metrics)
+
+# (valgfrit) Lille plot for at se fordelingen
+ggplot(all_metrics, aes(x = r2, y = crs_sd, color = factor(isOff))) +
+  geom_point() +
+  labs(
+    x = "R² (lm(lat ~ lng))",
+    y = "SD(crs)",
+    color = "isOff",
+    title = "Cirkelfly (isOff = 1) vs. øvrige fly"
+  ) +
+  theme_minimal()
